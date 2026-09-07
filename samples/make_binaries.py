@@ -113,8 +113,35 @@ def main() -> int:
     dump += b"ip 203.0.113.47 path C:\\Users\\operator\\AppData\\Local\\FiveM"
     (OUT / "crash.dmp").write_bytes(bytes(dump))
 
+    # --- synthetic compiled Lua resource + escrow pack -------------------
+    packed = OUT.parent / "resources" / "[local]" / "packed"
+    packed.mkdir(parents=True, exist_ok=True)
+
+    # A Lua 5.4 LUAC-shaped blob carrying realistic (fake) string constants.
+    bc = bytearray()
+    bc += b"\x1bLua" + bytes([0x54]) + b"\x00"
+    bc += b"\x19\x93\r\n\x1a\n"          # LUAC_DATA
+    bc += struct.pack("<BBBB", 4, 8, 8, 0)  # instr / int / num sizes, sizeUpvalues
+    bc += b"\x00" * 24
+    for s in (
+        b"https://cdn.example-update.net/v2/loader.bin",
+        b"https://discord.com/api/webhooks/111222333444555666/FAKEFAKEFAKEFAKEFAKE",
+        b"loadstring",
+        b"os.execute",
+        b"esx_banking:withdraw",
+        b"qb-admin:giveMoney",
+        b"185.220.101.44:8443",
+    ):
+        bc += bytes([len(s) + 1]) + s + b"\x00"
+    (packed / "handler.luac").write_bytes(bytes(bc))
+
+    # Escrow / asset pack container (opaque by design).
+    (packed / "paid_hud.fxap").write_bytes(b"FXAP\x01" + b"\x00" * 300)
+
     for p in sorted(OUT.iterdir()):
         print(f"  wrote {p} ({p.stat().st_size} bytes)")
+    print(f"  wrote {packed / 'handler.luac'}")
+    print(f"  wrote {packed / 'paid_hud.fxap'}")
     return 0
 
 

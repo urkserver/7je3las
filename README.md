@@ -2,9 +2,14 @@
 
 **منصّة تقييم أمني مصرّح بها (Authorized Security Assessment) لتطبيق Cfx.re / FiveM (FXServer) ومحتوياته.**
 
-> `FIVEM-AUDIT` تفحص **منشأة FiveM المثبتة على جهازك**: ثنائياتها، مواردها (Lua/JS/C#)،
-> إعداداتها، كاشها، سجلاتها، وملفات الانهيار — وتنتج تقريرًا احترافيًا جاهزًا للتقديم
-> في برنامج الإفصاح عن الثغرات.
+> `FIVEM-AUDIT` تفحص **تطبيق FiveM نفسه وكل محتوياته** — مو سيرفراتك:
+> ثنائيات التطبيق، جدول الاستيراد (imports) حقها، مواردها النصية
+> (Lua/JS/C#)، **مواردها المترجمة/المبهمة (Lua bytecode + حزم `.fxap`)**
+> إعداداتها، كاشها، سجلاتها، وملفات الانهيار.
+>
+> وتقارن **رقم بناء FXServer** المكتشِف مع قاعدة ثغرات منشورة
+> (مثل `CVE-2024-46310` و advisory يناير 2019) وتطلع تقريرًا احترافيًا
+> جاهزًا للتقديم في برنامج الإفصاح.
 
 ---
 
@@ -68,6 +73,11 @@ python3 -m fivem_audit scan --operator "you" --authorized
 ```bash
 python3 -m fivem_audit rules            # عرض كل قواعد الكشف (50+ قاعدة)
 python3 -m fivem_audit rules --json
+
+python3 -m fivem_audit cve              # قاعدة الثغرات المنشورة لـ Cfx.re
+python3 -m fivem_audit cve players      # فلترة
+python3 -m fivem_audit cve --json
+
 python3 -m fivem_audit inventory /path  # جرد ملفات المنشأة (أحجام + امتدادات)
 ```
 
@@ -76,7 +86,7 @@ python3 -m fivem_audit inventory /path  # جرد ملفات المنشأة (أح
 | الخيار | الوصف |
 |---|---|
 | `-f, --format` | `json` / `md` / `html` / `all` (الافتراضي `all`) |
-| `-m, --modules` | `content,config,binary,permissions,artifacts,data,network` |
+| `-m, --modules` | `config,content,bytecode,binary,imports,permissions,artifacts,data,network,cve` |
 | `--min-severity` | تصفية النتائج (`INFO`/`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`) |
 | `--no-probe` | اكتشاف المنافذ بدون استعلام HTTP |
 | `--ticket` | رقم مرجعي يُكتب في التقرير |
@@ -99,7 +109,23 @@ python3 -m fivem_audit scan /path --operator you --authorized -m config,binary
 | `permissions` | مجلدات/ملفات قابلة للكتابة داخل مجلد التطبيق — سطح التحميل الجانبي (DLL sideload) والعبث |
 | `artifacts` | بقايا البناء: رموز التصحيح (`.pdb`), `.git`، ملفات الانهيار، النسخ الاحتياطية؛ + جرد المكوّنات المضمّنة (CEF, SQLite, OpenSSL…) |
 | `data` | تسريب بيانات في الكاش/السجلات/الـ dumps/قواعد SQLite — معرّفات اللاعبين، IP، إيميل، توكنات، مفاتيح Keymaster |
+| `bytecode` | **الموارد المترجمة والمبهمة** — كشف Lua 5.1–5.4 bytecode واستخراج ثوابته النصية (روابط، webhooks، `loadstring`، `os.execute`، أحداث اقتصادية) + تمييز حزم `.fxap` غير القابلة للقراءة |
+| `imports` | **جدول استيراد PE** — جرد قدرات الثنائيات (حقن عمليات، إنشاء عمليات، `LoadLibrary`، `VirtualProtect`) + أسماء DLL الأكثر استهدافًا في هجمات التحميل الجانبي |
+| `cve` | **كشف إصدار البناء + ربطه بالثغرات المنشورة** — يقرأ `version` / اسم المجلد / `/info.json` ثم يقارن بنطاق الإصدارات المتأثرة |
 | `network` | المنافذ المستمعة + استعلام HTTP **للـ loopback فقط** على `/info.json`, `/players.json`, `/dynamic.json`, `/status.json` |
+
+### قاعدة الثغرات المضمّنة (`fivem-audit cve`)
+
+| المعرّف | النطاق | الثابت في |
+|---|---|---|
+| `CVE-2024-46310` | قراءة **وتعديل** بيانات المستخدمين بدون مصادقة عبر منفذ API مكشوف (`/players.json`) — `CWE-281` | build 9602 |
+| `CFX-ADV-2019-01-02` | DoS بدون مصادقة في تحليل حزم الـ remote console (UDP) — `CWE-754` | build 957 |
+| `CFX-ADV-2025-08-ESCROW` | إقرار علني من Cfx.re بوجود مشكلة أمنية في نظام asset escrow | قيد المعالجة |
+| `CFX-CLASS-NUI-CEF` | متصفح NUI/CEF المضمّن يرث ثغرات Chromium | تحديث العميل |
+| `CFX-CLASS-EVENT-TRUST` | حدود الثقة client→server (أكثر صنف مستغل في FiveM) | فحص صلاحيات |
+| `CFX-CLASS-SIDELOAD` | مجلد التطبيق قابل للكتابة → اختطاف ترتيب بحث DLL | صلاحيات |
+
+> كل إدخال فيه مصدره. **تحقّق منه قبل التبليغ** — قاعدة البيانات مرجع، مو حكم نهائي.
 
 ---
 
@@ -151,6 +177,10 @@ python3 -m fivem_audit scan samples/vulnerable-tree \
   عبر `VersionInfo` قبل ما تبلّغ.
 - `FMA-EVT-*` تستخدم نوافذ سياق لتقليل الإيجابيات الكاذبة — قد تفوتها حالة نادرة.
 - الوحدة الشبكية تفحص **الـ loopback فقط**. أي هدف غير محلي يتطلب إذنًا كتابيًا منفصلًا.
+- `imports` يحتاج جدول استيراد فعلي في الـ PE — الثنائيات الاصطناعية داخل `samples/`
+  ما فيها، فتظهر 0 نتيجة هناك. على ثنائيات FiveM الحقيقية تشتغل طبيعي.
+- `cve` يعتمد على كشف رقم البناء: ملف `version`، أو تسمية المجلد
+  (`server-files-9602/`)، أو `/info.json`. لو ما لقى شيء، يبلّغ ويكمل.
 
 ---
 

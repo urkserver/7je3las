@@ -26,7 +26,8 @@ BINARY_EXTS = {".exe", ".dll", ".sys", ".efi", ".so", ".bin", ".node"}
 # --------------------------------------------------------------------------
 class PEInfo:
     __slots__ = ("machine", "characteristics", "dll_characteristics",
-                 "is_pe32plus", "signed", "sections", "image_base")
+                 "is_pe32plus", "signed", "sections", "sections_full",
+                 "data_dirs", "image_base")
 
     def __init__(self) -> None:
         self.machine = 0
@@ -35,6 +36,8 @@ class PEInfo:
         self.is_pe32plus = False
         self.signed = False
         self.sections: list[tuple[str, int]] = []
+        self.sections_full: list[tuple] = []
+        self.data_dirs: list[tuple[int, int]] = []
         self.image_base = 0
 
 
@@ -89,13 +92,19 @@ def parse_pe(data: bytes) -> PEInfo | None:
             info.image_base = struct.unpack_from("<I", data, opt + 28)[0]
         nrva_off = 92
 
-    # Data directory: certificate table is entry index 4.
+    # Data directories (index 1 = import table, 4 = certificate table).
     if opt + nrva_off + 4 <= len(data):
         nrva = struct.unpack_from("<I", data, opt + nrva_off)[0]
         dd = opt + nrva_off + 4
-        if nrva >= 5 and dd + 5 * 8 <= len(data):
-            _va, size = struct.unpack_from("<II", data, dd + 4 * 8)
-            if _va and size:
+        count = min(nrva, 16)
+        for i in range(count):
+            off = dd + i * 8
+            if off + 8 > len(data):
+                break
+            info.data_dirs.append(struct.unpack_from("<II", data, off))
+        if nrva >= 5 and len(info.data_dirs) > 4:
+            va, size = info.data_dirs[4]
+            if va and size:
                 info.signed = True
 
     sec_off = opt + size_opt
@@ -105,10 +114,194 @@ def parse_pe(data: bytes) -> PEInfo | None:
             break
         raw = data[base:base + 40]
         name = raw[:8].rstrip(b"\x00").decode("ascii", errors="replace")
-        _vs, _va, _srd, _prd, _pr, _pl, _nr, _nl, chars = struct.unpack_from(
+        vs, va, srd, prd, _pr, _pl, _nr, _nl, chars = struct.unpack_from(
             "<IIIIIIHHI", raw, 8)
         info.sections.append((name, chars))
+        info.sections_full.append((name, va, vs, prd, srd, chars))
     return info
+
+
+def rva_to_offset(pe: PEInfo, rva: int, size: int) -> int | None:
+    """Map an RVA to a file offset using the section table."""
+    for _name, va, vsize, praw, sraw, _chars in pe.sections_full:
+        span = max(vsize, sraw)
+        if va <= rva < va + span:
+            delta = rva - va
+            if delta < sraw:
+                return praw + delta
+            return None
+    # Header region: RVAs below the first section map 1:1.
+    if pe.sections_full and rva < min(s[1] for s in pe.sections_full):
+        return rva
+    return None
+
+
+def parse_imports(data: bytes, pe: PEInfo, limit: int = 400) -> dict[str, list[str]]:
+    """Return {dll_name: [imported function names]} from the import table."""
+    if len(pe.data_dirs) < 2:
+        return {}
+    rva, _size = pe.data_dirs[1]
+    if not rva:
+        return {}
+    off = rva_to_offset(pe, rva, 0)
+    if off is None or off + 20 > len(data):
+        return {}
+
+    ptr_size = 8 if pe.is_pe32plus else 4
+    fmt = "<Q" if pe.is_pe32plus else "<I"
+    out: dict[str, list[str]] = {}
+    desc = off
+    for _ in range(64):
+        if desc + 20 > len(data):
+            break
+        _oft, _ts, _fc, name_rva, thunk_rva = struct.unpack_from("<IIIII", data, desc)
+        if not name_rva and not thunk_rva:
+            break
+        desc += 20
+
+        name_off = rva_to_offset(pe, name_rva, 0)
+        if name_off is None:
+            continue
+        end = data.find(b"\x00", name_off)
+        if end == -1:
+            continue
+        try:
+            dll = data[name_off:end].decode("ascii", errors="replace")
+        except Exception:
+            continue
+        if not dll:
+            continue
+
+        funcs: list[str] = []
+        thunk_off = rva_to_offset(pe, thunk_rva or name_rva, 0)
+        if thunk_off is not None:
+            cur = thunk_off
+            while cur + ptr_size <= len(data) and len(funcs) < limit:
+                val = struct.unpack_from(fmt, data, cur)[0]
+                cur += ptr_size
+                if not val:
+                    break
+                # High bit set => ordinal import, no name available.
+                if val & ((1 << 63) if pe.is_pe32plus else (1 << 31)):
+                    funcs.append(f"ordinal#{val & 0xFFFF}")
+                    continue
+                fn_off = rva_to_offset(pe, val & 0x7FFFFFFF, 0)
+                if fn_off is None or fn_off + 2 > len(data):
+                    continue
+                fend = data.find(b"\x00", fn_off + 2)
+                if fend == -1:
+                    continue
+                funcs.append(data[fn_off + 2:fend].decode("ascii", errors="replace"))
+        out[dll] = funcs
+    return out
+
+
+# Imports grouped by the capability they confer. Inventorying these is how you
+# describe a binary's attack surface; it is inspection, not exploitation.
+IMPORT_GROUPS: list[tuple[str, tuple[str, ...], Severity, str, str, str]] = [
+    ("FMA-IMP-001",
+     ("CreateRemoteThread", "NtCreateThreadEx", "RtlCreateUserThread",
+      "WriteProcessMemory", "NtWriteVirtualMemory", "VirtualAllocEx",
+      "NtAllocateVirtualMemory", "QueueUserAPC", "NtQueueApcThread",
+      "SetWindowsHookEx", "NtMapViewOfSection"),
+     Severity.LOW, "CWE-119",
+     "Process-injection capability present",
+     "The module can allocate, write to, and execute code in another process.",
+     "Inventory only. Its presence tells you what an attacker who reaches script "
+     "or native execution could leverage; it is not itself a vulnerability."),
+    ("FMA-IMP-002",
+     ("CreateProcessA", "CreateProcessW", "ShellExecuteA", "ShellExecuteW",
+      "WinExec", "system", "popen", "_popen"),
+     Severity.LOW, "CWE-78",
+     "Process creation capability present",
+     "The module can launch other executables on the host.",
+     "Inventory only. Combined with a scripting-context bug this turns into host command execution."),
+    ("FMA-IMP-003",
+     ("LoadLibraryA", "LoadLibraryW", "LoadLibraryExA", "LoadLibraryExW", "dlopen"),
+     Severity.LOW, "CWE-427",
+     "Dynamic module loading present",
+     "Modules are resolved at runtime, so a hijackable search path becomes a code-execution path.",
+     "Confirm the loader uses absolute paths and SafeDllSearchMode; keep the application directory non-writable."),
+    ("FMA-IMP-004",
+     ("VirtualProtect", "VirtualProtectEx", "NtProtectVirtualMemory", "mprotect"),
+     Severity.LOW, "CWE-119",
+     "Memory-protection changes possible",
+     "The module can make pages executable, which is the classic unpacker / shellcode staging pattern.",
+     "Inventory only. Relevant when assessing whether DEP is meaningfully enforced at runtime."),
+    ("FMA-IMP-005",
+     ("GetProcAddress", "dlsym"),
+     Severity.INFO, "",
+     "Dynamic symbol resolution present",
+     "API calls are resolved at runtime, which static review cannot fully enumerate.",
+     "Inventory only."),
+]
+
+
+def scan_import_surface(root: Path, result: ScanResult) -> None:
+    """Inventory the capability surface exposed by imported APIs."""
+    root = Path(root)
+    for path in walk_files(root, {".exe", ".dll", ".so", ".dylib", ".node"}):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        pe = parse_pe(data) if data[:2] == b"MZ" else None
+        if pe is None:
+            continue
+        imports = parse_imports(data, pe)
+        if not imports:
+            continue
+
+        rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+        flat = {f.lower() for funcs in imports.values() for f in funcs}
+
+        for rule_id, names, sev, cwe, title, desc, fix in IMPORT_GROUPS:
+            hits = sorted(n for n in names if n.lower() in flat)
+            if not hits:
+                continue
+            result.add(Finding(
+                rule_id=rule_id,
+                title=f"{title} - {path.name}",
+                severity=sev,
+                category="Attack Surface",
+                target=rel,
+                cwe=cwe,
+                evidence="imports: " + ", ".join(hits[:12]),
+                description=desc,
+                impact=fix,
+                remediation=("No change required by itself. Record it so the "
+                             "capability is accounted for when evaluating any "
+                             "code-execution finding in this component."),
+                confidence=Confidence.HIGH,
+                tags=["attack-surface", "imports"],
+            ))
+
+        suspicious_dlls = sorted(
+            d for d in imports
+            if d.lower() in {"version.dll", "winmm.dll", "dsound.dll",
+                             "dinput8.dll", "d3d11.dll", "dxgi.dll",
+                             "opengl32.dll", "msimg32.dll", "winhttp.dll"}
+        )
+        if suspicious_dlls:
+            result.add(Finding(
+                rule_id="FMA-IMP-010",
+                title="Module imports DLLs commonly used for search-order hijacking",
+                severity=Severity.MEDIUM,
+                category="Attack Surface",
+                target=rel,
+                cwe="CWE-427",
+                evidence="imports: " + ", ".join(suspicious_dlls),
+                description=("These DLL names are frequently resolved through the "
+                             "application directory, and are the most commonly "
+                             "abused sideload targets on Windows."),
+                impact=("If the application directory is writable, a planted DLL "
+                        "with one of these names loads instead of the system copy, "
+                        "yielding code execution at launch for every user."),
+                remediation=("Keep the application directory non-writable and load "
+                             "system DLLs by absolute path."),
+                confidence=Confidence.MEDIUM,
+                tags=["sideload", "attack-surface", "imports"],
+            ))
 
 
 # --------------------------------------------------------------------------

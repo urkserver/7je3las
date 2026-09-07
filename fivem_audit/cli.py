@@ -30,11 +30,14 @@ from .scanners import (
     dataexposure as data_scanner,
     inventory as inv_scanner,
     localnet as net_scanner,
+    luabc as bc_scanner,
+    version as ver_scanner,
 )
 from .rules import ALL_CONTENT_RULES, CFG_RULES, BUNDLED_COMPONENTS, EXT_LANG
+from . import cvedb
 
-ALL_MODULES = ("content", "config", "binary", "permissions", "artifacts",
-               "data", "network")
+ALL_MODULES = ("config", "content", "bytecode", "binary", "imports",
+               "permissions", "artifacts", "data", "network", "cve")
 
 BANNER = r"""
   ______ _    ______  __  __          _    _         _ _
@@ -143,9 +146,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if "content" in modules:
         stage("static content analysis (lua / js / cs)",
               lambda: content_scanner.scan_content(root, result, deep=True))
+    if "bytecode" in modules:
+        stage("compiled / escrow content analysis (lua bytecode, .fxap)",
+              lambda: bc_scanner.scan_bytecode(root, result))
     if "binary" in modules:
         stage("binary hardening posture (PE / ELF)",
               lambda: bin_scanner.scan_binary_posture(root, result))
+    if "imports" in modules:
+        stage("import-table attack surface (PE imports)",
+              lambda: bin_scanner.scan_import_surface(root, result))
     if "permissions" in modules:
         stage("filesystem permission / sideload surface",
               lambda: bin_scanner.scan_permissions(root, result))
@@ -160,6 +169,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if "network" in modules:
         stage("local network surface (loopback only)",
               lambda: net_scanner.scan_local_network(result, probe=not args.no_probe))
+    if "cve" in modules:
+        # runs after network so /info.json data can feed version detection
+        stage("build detection & known-vulnerability correlation",
+              lambda: ver_scanner.scan_versions(
+                  root, result, result.metadata.get("fxserver_info")))
 
     print("[*] building inventory ...", end=" ", flush=True)
     result.metadata["inventory"] = inv_scanner.build_inventory(root)
@@ -249,6 +263,38 @@ def cmd_rules(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cve(args: argparse.Namespace) -> int:
+    rows = []
+    for a in cvedb.ADVISORIES:
+        rows.append({
+            "id": a.ident,
+            "severity": a.severity.label,
+            "cwe": a.cwe,
+            "product": a.product,
+            "cvss": a.cvss,
+            "affected": (f"<= build {a.max_affected_build}" if a.max_affected_build
+                         else "class / unversioned"),
+            "fixed": a.fixed_build or "-",
+            "title": a.title,
+        })
+    if getattr(args, "term", ""):
+        t = args.term.lower()
+        rows = [r for r in rows if t in r["id"].lower() or t in r["title"].lower()]
+
+    if args.json:
+        print(dump_json(rows))
+        return 0
+
+    print(f"{'ID':<24}{'SEVERITY':<11}{'CWE':<11}{'AFFECTED':<16}{'FIXED':<8}TITLE")
+    print("-" * 110)
+    for r in rows:
+        print(f"{r['id']:<24}{r['severity']:<11}{r['cwe']:<11}"
+              f"{r['affected']:<16}{r['fixed']:<8}{r['title'][:44]}")
+    print(f"\n{len(rows)} advisories. Sources are listed per entry in "
+          f"fivem_audit/cvedb.py - verify before reporting.")
+    return 0
+
+
 def cmd_inventory(args: argparse.Namespace) -> int:
     root = inv_scanner.discover_install(args.path)
     if root is None:
@@ -309,6 +355,11 @@ def build_parser() -> argparse.ArgumentParser:
     rc = sub.add_parser("rules", help="list the detection rule set")
     rc.add_argument("--json", action="store_true", help="emit JSON")
     rc.set_defaults(func=cmd_rules)
+
+    cc = sub.add_parser("cve", help="list the bundled Cfx.re advisory database")
+    cc.add_argument("term", nargs="?", default="", help="filter term")
+    cc.add_argument("--json", action="store_true", help="emit JSON")
+    cc.set_defaults(func=cmd_cve)
 
     ic = sub.add_parser("inventory", help="inventory an install tree")
     ic.add_argument("path", nargs="?", default=None,
