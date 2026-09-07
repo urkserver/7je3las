@@ -1,9 +1,0 @@
-# FIVEM-AUDIT runs on the Python standard library alone.
-# Python >= 3.10 is required (uses PEP 604 union syntax and IntEnum features).
-
-python>=3.10
-
-# --- Optional -------------------------------------------------------------
-# None required. The following are only useful if you extend the tool:
-#   pefile  - richer PE header / section inspection
-#   yara    - custom signature matching (needs libyara)

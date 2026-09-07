@@ -1,9 +1,0 @@
-[2026-09-01 21:13:58] CitizenFX starting on Windows
-[2026-09-01 21:13:58] Loaded: C:\Users\operator\AppData\Local\FiveM\FiveM.app\citizen\clr2\libmono.dll
-[2026-09-01 21:13:59] Connecting to 91.121.87.14:30120
-[2026-09-01 21:13:59] Using license key cfxk_8f3a91c2d47b6e05a19cfake0000DEMO
-[2026-09-01 21:14:01] Auth token: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI5MTgyNzMifQ.abcdefghijklmnopqrstuv
-[2026-09-01 21:14:03] Local account cached at /home/operator/.local/share/FiveM/cache
-[2026-09-01 21:14:03] mysql connection: mysql://fivem:Sup3rSecretPass@10.0.0.5:3306/essentialmode
-[2026-09-01 21:14:04] session password=letmein123 for user demo_player
-[2026-09-01 21:14:04] peer 203.0.113.47 connected
