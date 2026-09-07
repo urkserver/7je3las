@@ -29,3 +29,9 @@ game28.dta
 
 # Log files
 warnings.log
+
+# --- FIVEM-AUDIT ---
+__pycache__/
+*.py[cod]
+.venv/
+reports/
